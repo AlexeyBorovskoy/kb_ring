@@ -28,6 +28,8 @@ ssh "${SSH_USER}@${HOST}" "tar -czf - --ignore-failed-read \
   /home/yc-user/tg_digest_system/tg_digest_system/docker/.env \
   /home/yc-user/tg_digest_system/tg_digest_system/docker/secrets.env \
   /home/yc-user/tg_digest_system/tg_digest_system/config/channels.json \
+  /home/yc-user/tg_digest_system/tg_digest_system/db/schema.sql \
+  /home/yc-user/tg_digest_system/tg_digest_system/db/migrations \
   /home/yc-user/tg_digest_system/tg_digest_system/prompts \
   2>/dev/null || true" > "${OUT_DIR}/tg_config.tgz"
 tar -xzf "${OUT_DIR}/tg_config.tgz" -C "${OUT_DIR}"
