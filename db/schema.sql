@@ -57,12 +57,15 @@ CREATE TABLE IF NOT EXISTS tac.embeddings (
   chunk_id BIGINT NOT NULL REFERENCES tac.chunks(id) ON DELETE CASCADE,
   model TEXT NOT NULL,
   dims INTEGER NOT NULL,
-  embedding vector(1536),              -- дефолт для многих моделей; позже сделаем настраиваемо
+  chunk_sha256 TEXT,
+  embedding vector(384),               -- локальные sentence-transformers (all-MiniLM-L6-v2)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(chunk_id, model)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tac_embeddings_chunk ON tac.embeddings(chunk_id);
+-- Индекс для cosine similarity (опционально; при больших объёмах включить ivfflat/hnsw тюнингом).
+CREATE INDEX IF NOT EXISTS idx_tac_embeddings_vec_cos ON tac.embeddings USING ivfflat (embedding vector_cosine_ops);
 
 -- -----------------------------------------------------------------------------
 -- op.jobs: асинхронная обработка (ingest/index/enrich)

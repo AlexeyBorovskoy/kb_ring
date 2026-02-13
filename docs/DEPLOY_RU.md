@@ -40,3 +40,24 @@
 Не хранить реальные секреты в git.
 Для сервера держать `.env`/`secrets.env` только на хосте (например `/opt/kb-ring/`), права 600.
 
+## Embeddings + hybrid retrieval (локально, по ТЗ)
+
+Требование: embeddings считаются локально (sentence-transformers), а поиск использует:
+- FTS по `tac.chunks.tsv`
+- cosine similarity по `tac.embeddings.embedding` (pgvector)
+
+Практика:
+- воркер пишет embeddings при индексации документа (по `chunk_sha256`, инкрементально);
+- API использует hybrid retrieval там, где доступен эмбеддер; иначе работает в режиме FTS-only.
+
+Переменные окружения (общие для API и worker):
+- `EMBEDDINGS_ENABLED=1`
+- `EMBEDDINGS_MODEL=sentence-transformers/all-MiniLM-L6-v2`
+- `EMBEDDINGS_DIMS=384`
+
+Миграции:
+- таблица embeddings на `vector(384)` задаётся в `kb_ring/db/migrations/004_local_embeddings.sql`.
+  - В текущем виде миграция пересоздаёт `tac.embeddings` (если нужно без потерь данных, миграцию надо адаптировать).
+
+Индексы pgvector:
+- создаётся `ivfflat` индекс под cosine ops; для качества/скорости на больших объёмах потребуется тюнинг (lists/probes) и `ANALYZE`.

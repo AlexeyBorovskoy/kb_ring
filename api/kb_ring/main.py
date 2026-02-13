@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from .auth import AuthUser, create_access_token, token_from_header, verify_access_token
 from .config import AUTH_COOKIE_DOMAIN, AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE
 from .db import db_conn
+from .embeddings import get_embedder, pgvector_text
 from .llm import openai_chat_completion
 from .retrieval import hybrid_retrieve
 
@@ -127,29 +128,94 @@ def search(
     current_user: AuthUser = Depends(get_current_user),
 ):
     """
-    Этап 1: FTS поиск по `tac.chunks`. Воркер создаёт чанки и `tsvector`.
+    Hybrid search:
+    - FTS по `tac.chunks.tsv`
+    - vector similarity по `tac.embeddings` (локальные sentence-transformers), если доступно
     """
     q = (q or "").strip()
     if not q:
         return {"items": []}
     limit = max(1, min(50, int(limit)))
 
+    embedder = get_embedder()
+    qvec_txt: Optional[str] = None
+    model: Optional[str] = None
+    if embedder is not None and int(getattr(embedder, "dims", 0) or 0) == 384:
+        try:
+            qvec_txt = pgvector_text(embedder.embed_one(q))
+            model = embedder.model_name
+        except Exception:
+            qvec_txt = None
+            model = None
+
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT d.id, d.title, d.source, d.doc_type, d.source_ref, d.uri,
-                       c.chunk_text,
-                       ts_rank(c.tsv, plainto_tsquery('simple', %s)) AS rank
-                FROM tac.chunks c
-                JOIN tac.documents d ON d.id = c.document_id
-                WHERE d.user_id = %s
-                  AND c.tsv @@ plainto_tsquery('simple', %s)
-                ORDER BY rank DESC
-                LIMIT %s
-                """,
-                (q, current_user.user_id, q, limit),
-            )
+            if qvec_txt and model:
+                cur.execute(
+                    """
+                    WITH
+                      fts AS (
+                        SELECT
+                          c.id AS chunk_id,
+                          ts_rank(c.tsv, plainto_tsquery('simple', %(q)s)) AS s_fts
+                        FROM tac.chunks c
+                        JOIN tac.documents d ON d.id = c.document_id
+                        WHERE d.user_id = %(user_id)s
+                          AND c.tsv @@ plainto_tsquery('simple', %(q)s)
+                        ORDER BY s_fts DESC
+                        LIMIT 200
+                      ),
+                      vec AS (
+                        SELECT
+                          e.chunk_id AS chunk_id,
+                          (1.0 - (e.embedding <=> (%(qvec)s)::vector(384))) AS s_vec
+                        FROM tac.embeddings e
+                        JOIN tac.chunks c ON c.id = e.chunk_id
+                        JOIN tac.documents d ON d.id = c.document_id
+                        WHERE d.user_id = %(user_id)s
+                          AND e.model = %(model)s
+                        ORDER BY e.embedding <=> (%(qvec)s)::vector(384)
+                        LIMIT 200
+                      ),
+                      comb AS (
+                        SELECT
+                          COALESCE(fts.chunk_id, vec.chunk_id) AS chunk_id,
+                          COALESCE(fts.s_fts, 0.0) AS s_fts,
+                          COALESCE(vec.s_vec, 0.0) AS s_vec,
+                          (0.55 * COALESCE(fts.s_fts, 0.0) + 0.45 * COALESCE(vec.s_vec, 0.0)) AS rank
+                        FROM fts
+                        FULL OUTER JOIN vec ON vec.chunk_id = fts.chunk_id
+                      )
+                    SELECT
+                      d.id, d.title, d.source, d.doc_type, d.source_ref, d.uri,
+                      c.chunk_text,
+                      comb.rank,
+                      comb.s_fts,
+                      comb.s_vec
+                    FROM comb
+                    JOIN tac.chunks c ON c.id = comb.chunk_id
+                    JOIN tac.documents d ON d.id = c.document_id
+                    WHERE d.user_id = %(user_id)s
+                    ORDER BY comb.rank DESC
+                    LIMIT %(limit)s
+                    """,
+                    {"q": q, "user_id": current_user.user_id, "limit": limit, "qvec": qvec_txt, "model": model},
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT d.id, d.title, d.source, d.doc_type, d.source_ref, d.uri,
+                           c.chunk_text,
+                           ts_rank(c.tsv, plainto_tsquery('simple', %s)) AS rank
+                    FROM tac.chunks c
+                    JOIN tac.documents d ON d.id = c.document_id
+                    WHERE d.user_id = %s
+                      AND c.tsv @@ plainto_tsquery('simple', %s)
+                    ORDER BY rank DESC
+                    LIMIT %s
+                    """,
+                    (q, current_user.user_id, q, limit),
+                )
             rows = cur.fetchall()
     items = []
     for r in rows:
@@ -163,6 +229,8 @@ def search(
                 "uri": r[5],
                 "chunk_text": r[6],
                 "rank": float(r[7]),
+                "fts_rank": float(r[8]) if len(r) > 8 and r[8] is not None else None,
+                "vec_score": float(r[9]) if len(r) > 9 and r[9] is not None else None,
             }
         )
     return {"items": items}
@@ -201,13 +269,36 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
     .hit .meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
     .hit pre { margin: 10px 0 0; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
     .disabled { opacity: 0.6; pointer-events: none; }
+
+    /* Chat */
+    .chatlog { margin-top: 12px; display: grid; gap: 10px; }
+    .msg { border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 12px; background: rgba(0,0,0,0.10); }
+    .msg.user { border-color: rgba(110,231,255,0.35); }
+    .msg.assistant { border-color: rgba(255,255,255,0.10); }
+    .msg .role { font-size: 12px; color: var(--muted); }
+    .msg pre { margin: 8px 0 0; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
+    .cit { margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.10); padding-top: 8px; }
+    .cit .c { font-size: 12px; color: var(--muted); line-height: 1.45; }
   </style>
   <script>
+    const CHAT_SID_KEY = 'kb_ring_session_id';
+    let chatInitDone = false;
+
     function setTab(tab) {
       const tabs = document.querySelectorAll('[data-tab]');
       tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
       document.querySelectorAll('[data-pane]').forEach(p => p.style.display = (p.dataset.pane === tab) ? 'block' : 'none');
       location.hash = tab;
+      if (tab === 'chat') initChat();
+    }
+
+    function escapeHtml(s) {
+      return (s || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
     }
 
     async function doSearch() {
@@ -252,6 +343,104 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
       out.textContent = r.ok ? JSON.stringify(await r.json(), null, 2) : await r.text();
     }
 
+    async function ensureChatSession() {
+      let sid = localStorage.getItem(CHAT_SID_KEY);
+      if (sid) return parseInt(sid, 10);
+      const body = new URLSearchParams();
+      body.set('title', 'ui');
+      const r = await fetch('/api/v1/chat/sessions', { method: 'POST', body });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      sid = data.session_id;
+      localStorage.setItem(CHAT_SID_KEY, String(sid));
+      return sid;
+    }
+
+    async function loadChat() {
+      const out = document.getElementById('chatlog');
+      out.innerHTML = '';
+      const sid = await ensureChatSession();
+      const r = await fetch('/api/v1/chat/sessions/' + sid, { headers: { 'accept': 'application/json' }});
+      if (!r.ok) {
+        out.innerHTML = '<div class="msg assistant"><div class="role">system</div><pre>' + escapeHtml(await r.text()) + '</pre></div>';
+        return;
+      }
+      const data = await r.json();
+      const msgs = data.messages || [];
+      for (const m of msgs) {
+        const el = document.createElement('div');
+        el.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+        el.innerHTML = '<div class="role">' + escapeHtml(m.role) + '</div><pre>' + escapeHtml(m.content || '') + '</pre>';
+        out.appendChild(el);
+      }
+    }
+
+    function renderCitations(citations) {
+      const items = citations || [];
+      if (!items.length) return '';
+      let html = '<div class="cit"><div class="role">citations</div>';
+      for (const c of items) {
+        const meta = '[' + (c.n ?? '?') + '] ' + (c.uri || '') + (c.title ? (' | ' + c.title) : '') + ' | chunk_id=' + c.chunk_id;
+        html += '<div class="c">' + escapeHtml(meta) + '</div>';
+        if (c.excerpt) html += '<div class="c"><pre style="margin:6px 0 0; white-space:pre-wrap;">' + escapeHtml(c.excerpt) + '</pre></div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    async function sendChat() {
+      const inp = document.getElementById('chat_text');
+      const mode = document.getElementById('chat_mode').value;
+      const q = inp.value.trim();
+      if (!q) return;
+      const sid = await ensureChatSession();
+      const out = document.getElementById('chatlog');
+
+      const u = document.createElement('div');
+      u.className = 'msg user';
+      u.innerHTML = '<div class="role">user</div><pre>' + escapeHtml(q) + '</pre>';
+      out.appendChild(u);
+      inp.value = '';
+
+      const body = new URLSearchParams();
+      body.set('text', q);
+      body.set('mode', mode);
+      const r = await fetch('/api/v1/chat/sessions/' + sid + '/message', { method: 'POST', body });
+      if (!r.ok) {
+        const e = document.createElement('div');
+        e.className = 'msg assistant';
+        e.innerHTML = '<div class="role">error</div><pre>' + escapeHtml(await r.text()) + '</pre>';
+        out.appendChild(e);
+        return;
+      }
+      const data = await r.json();
+
+      const a = document.createElement('div');
+      a.className = 'msg assistant';
+      if (data.mode === 'search') {
+        a.innerHTML = '<div class="role">assistant (search)</div><pre>Результаты retrieval (без LLM)</pre>' + renderCitations(data.results || []);
+      } else {
+        a.innerHTML = '<div class="role">assistant (' + escapeHtml(data.mode || 'rag') + ')</div><pre>' + escapeHtml((data.answer || {}).text || '') + '</pre>' + renderCitations(data.citations || []);
+      }
+      out.appendChild(a);
+    }
+
+    async function newChatSession() {
+      localStorage.removeItem(CHAT_SID_KEY);
+      await loadChat();
+    }
+
+    async function initChat() {
+      if (chatInitDone) return;
+      chatInitDone = true;
+      document.getElementById('chat_send').addEventListener('click', (e) => { e.preventDefault(); sendChat(); });
+      document.getElementById('chat_text').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
+      });
+      document.getElementById('chat_new').addEventListener('click', (e) => { e.preventDefault(); newChatSession(); });
+      await loadChat();
+    }
+
     window.addEventListener('load', () => {
       const tab = (location.hash || '#search').slice(1);
       setTab(tab);
@@ -273,7 +462,7 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
     <div class="tabs">
       <a class="tab" href="#search" data-tab="search">ПОИСК</a>
       <a class="tab" href="#ingest" data-tab="ingest">INGEST</a>
-      <a class="tab disabled" href="#chat" data-tab="chat" title="Planned (see запросы по kb.txt)">CHAT (RAG)</a>
+      <a class="tab" href="#chat" data-tab="chat" title="search = без LLM, rag = с LLM (нужен OPENAI_API_KEY)">CHAT (RAG)</a>
     </div>
 
     <div class="card" data-pane="search">
@@ -284,7 +473,7 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
         </div>
         <button id="q_btn">Искать</button>
       </div>
-      <div class="hint">Режим search-only: без LLM. (RAG-чат будет отдельной вкладкой по ТЗ из “запросы по kb.txt” и “Ответы системы.txt”.)</div>
+      <div class="hint">Режим search-only: без LLM. (Чат (RAG) см. во вкладке CHAT.)</div>
       <div id="results" class="results"></div>
     </div>
 
@@ -306,6 +495,29 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
       </div>
       <div class="hint">После ingest создаётся job `index_document`: воркер нарежет чанки и запишет FTS.</div>
       <pre id="ingest_out" style="margin-top:10px; color: var(--muted)"></pre>
+    </div>
+
+    <div class="card" data-pane="chat" style="display:none">
+      <div class="row" style="grid-template-columns: 1fr auto auto;">
+        <div>
+          <label>Сообщение (Ctrl+Enter для отправки)</label>
+          <textarea id="chat_text" placeholder="например: где в проекте реализована индексация и какие таблицы БД используются?"></textarea>
+        </div>
+        <div>
+          <label>Mode</label>
+          <select id="chat_mode" style="width: 100%; box-sizing: border-box; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.15); color: var(--fg); padding: 10px 12px; outline: none;">
+            <option value="search">search</option>
+            <option value="rag">rag</option>
+            <option value="analysis">analysis</option>
+          </select>
+          <div class="hint">rag вызывает LLM и вернёт инженерный ответ с источниками.</div>
+        </div>
+        <div style="display:grid; gap:10px;">
+          <button id="chat_send">Отправить</button>
+          <button id="chat_new" style="background: rgba(255,255,255,0.08); color: var(--fg); border: 1px solid rgba(255,255,255,0.12); font-weight: 700;">Новая сессия</button>
+        </div>
+      </div>
+      <div id="chatlog" class="chatlog"></div>
     </div>
   </div>
 </body>
@@ -364,7 +576,7 @@ def chat_get_session(
 async def chat_post_message(
     session_id: int,
     text: str = Form(...),
-    mode: Literal["search", "rag"] = Form(default="search"),
+    mode: Literal["search", "rag", "analysis"] = Form(default="search"),
     current_user: AuthUser = Depends(get_current_user),
 ):
     q = (text or "").strip()
@@ -390,46 +602,106 @@ async def chat_post_message(
     with db_conn() as conn:
         retrieved = hybrid_retrieve(conn, current_user.user_id, q, top_k=15)
 
-    citations = [
-        {
-            "chunk_id": r.chunk_id,
-            "doc_id": r.doc_id,
-            "title": r.title,
-            "uri": r.uri,
-            "score": r.score,
-        }
-        for r in retrieved
-    ]
+    def _display_uri(r) -> str:
+        # Prefer canonical document URI; otherwise fall back to a stable pseudo-uri.
+        uri = (r.uri or "").strip()
+        if uri:
+            return uri
+        return f"chunk://{r.chunk_id}"
+
+    citations = []
+    for i, r in enumerate(retrieved, start=1):
+        excerpt = (r.content or "").strip()
+        if len(excerpt) > 500:
+            excerpt = excerpt[:500] + "..."
+        citations.append(
+            {
+                "n": i,
+                "chunk_id": r.chunk_id,
+                "doc_id": r.doc_id,
+                "title": r.title,
+                "uri": _display_uri(r),
+                "excerpt": excerpt,
+                "score": r.score,
+            }
+        )
 
     if mode == "search":
         return {"mode": "search", "results": citations, "user_message_id": user_message_id}
 
-    # mode == "rag": strict RAG answer based only on retrieved chunks.
+    # mode == "rag|analysis": strict answer based only on retrieved chunks.
+    if not retrieved:
+        answer_text = "данные не найдены"
+        confidence = "low"
+
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO chat.messages (session_id, role, content) VALUES (%s, 'assistant', %s) RETURNING id",
+                    (session_id, answer_text),
+                )
+                assistant_message_id = int(cur.fetchone()[0])
+
+        return {
+            "mode": mode,
+            "answer": {"text": answer_text, "confidence": confidence},
+            "citations": [],
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+        }
+
+    # Формируем контекст как нумерованный список источников, чтобы модель могла ссылаться [1], [2], ...
     context_parts = []
     for i, r in enumerate(retrieved, start=1):
-        hdr = f"[chunk #{i}] chunk_id={r.chunk_id} doc_id={r.doc_id}"
-        if r.uri:
-            hdr += f" uri={r.uri}"
+        uri = _display_uri(r)
+        hdr = f"[{i}] chunk_id={r.chunk_id} doc_id={r.doc_id}"
+        if uri:
+            hdr += f" uri={uri}"
+        if r.title:
+            hdr += f" title={r.title}"
         context_parts.append(hdr + "\n" + (r.content or ""))
     context = "\n\n".join(context_parts)
     # hard cap: avoid huge prompts; doc also caps <= 20 chunks
     if len(context) > 20000:
         context = context[:20000]
 
-    system = (
+    system_common = (
         "Ты инженерный ассистент.\n"
         "Отвечай ТОЛЬКО на основании приведённых источников.\n"
         "Если информации недостаточно — скажи \"данные не найдены\".\n"
         "Не придумывай факты.\n"
-        "Формат ответа:\n"
-        "1) Резюме\n"
-        "2) Извлечённые факты/структура\n"
-        "3) Рекомендуется открыть\n"
-        "4) Источники\n"
+        "\n"
+        "Требования к формату инженерного ответа:\n"
+        "- Резюме\n"
+        "- Структурированный список (интерфейсы/компоненты/модули) с назначением, ключевыми методами/контрактами\n"
+        "- Примеры команд/запросов (например curl), если применимо\n"
+        "- Рекомендуется открыть (конкретные документы/файлы), если применимо\n"
+        "- Итог (с чего начать)\n"
+        "- Источники (обязательно) как список: [1] chunk_id=<id> <uri>, [2] chunk_id=<id> <uri>, ...\n"
+        "\n"
+        "Правило: внутри текста по возможности ссылайся на источники как [1], [2], ...\n"
     )
 
-    llm = await openai_chat_completion(system=system, user=q, context=context, temperature=0.1, max_tokens=700)
+    if mode == "analysis":
+        system = (
+            system_common
+            + "\n"
+            + "Режим: ANALYSIS.\n"
+            + "Сделай отчёт/сводку по найденным источникам: что они покрывают, где противоречат, какие пробелы.\n"
+            + "Если есть несколько источников, сравни их и укажи расхождения.\n"
+        )
+        max_tokens = 900
+    else:
+        system = system_common + "\n" + "Режим: RAG ANSWER.\n"
+        max_tokens = 700
+
+    llm = await openai_chat_completion(system=system, user=q, context=context, temperature=0.1, max_tokens=max_tokens)
     answer_text = llm.text if llm else "данные не найдены"
+
+    # Enforce sources section even if the model forgot to output it.
+    if citations and "источники" not in (answer_text or "").lower():
+        src_lines = [f"[{c['n']}] chunk_id={c['chunk_id']} {c['uri']}" for c in citations]
+        answer_text = (answer_text or "").rstrip() + "\n\nИсточники (обязательно)\n" + "\n".join(src_lines)
 
     best_score = max((r.score for r in retrieved), default=0.0)
     confidence = "high" if best_score >= 0.25 else ("medium" if best_score >= 0.12 else "low")
@@ -449,7 +721,7 @@ async def chat_post_message(
                 )
 
     return {
-        "mode": "rag",
+        "mode": mode,
         "answer": {"text": answer_text, "confidence": confidence},
         "citations": citations,
         "user_message_id": user_message_id,
