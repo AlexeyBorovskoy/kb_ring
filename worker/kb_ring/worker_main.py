@@ -7,6 +7,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .embeddings import get_embedder, pgvector_text
+from .ner import extract_entities_regex
 
 load_dotenv(override=False)
 
@@ -63,6 +64,7 @@ def main():
 
         # Обрабатываем задачу уже вне транзакции блокировки.
         try:
+            t0 = time.time()
             with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT payload FROM op.jobs WHERE id=%s", (job_id,))
@@ -101,10 +103,10 @@ def main():
                         chunk_id = int(cur.fetchone()[0])
                         chunk_rows.append((chunk_id, csha, c))
 
-                    # Local embeddings (sentence-transformers): compute only for changed/missing chunks.
+                    # Local embeddings (sentence-transformers, E5): compute only for changed/missing chunks.
                     embedder = get_embedder()
-                    # DB schema currently fixed to vector(384). If config/model differs, skip embeddings.
-                    if embedder is not None and int(getattr(embedder, "dims", 0) or 0) == 384 and chunk_rows:
+                    # DB schema currently fixed to vector(768). If config/model differs, skip embeddings.
+                    if embedder is not None and int(getattr(embedder, "dims", 0) or 0) == 768 and chunk_rows:
                         chunk_ids = [r[0] for r in chunk_rows]
                         cur.execute(
                             "SELECT chunk_id, chunk_sha256 FROM tac.embeddings WHERE model=%s AND chunk_id = ANY(%s)",
@@ -118,13 +120,23 @@ def main():
                                 to_embed.append((chunk_id, csha, ctext))
 
                         if to_embed:
-                            texts = [r[2] for r in to_embed]
-                            vecs = embedder.embed_many(texts)
-                            for (chunk_id, csha, _), v in zip(to_embed, vecs):
+                            # Cache within job by chunk_sha256 (avoid recompute for duplicates).
+                            cache: dict[str, list[float]] = {}
+                            uniq: dict[str, str] = {}
+                            for _chunk_id, csha, ctext in to_embed:
+                                uniq.setdefault(csha, ctext)
+                            if uniq:
+                                vecs = embedder.embed_many(list(uniq.values()))
+                                for csha, v in zip(uniq.keys(), vecs):
+                                    cache[csha] = v
+                            for (chunk_id, csha, _ctext) in to_embed:
+                                v = cache.get(csha)
+                                if v is None:
+                                    continue
                                 cur.execute(
                                     """
                                     INSERT INTO tac.embeddings (chunk_id, model, dims, chunk_sha256, embedding)
-                                    VALUES (%s, %s, %s, %s, (%s)::vector(384))
+                                    VALUES (%s, %s, %s, %s, (%s)::vector(768))
                                     ON CONFLICT (chunk_id, model)
                                     DO UPDATE SET dims=excluded.dims,
                                                   chunk_sha256=excluded.chunk_sha256,
@@ -134,11 +146,34 @@ def main():
                                     (chunk_id, embedder.model_name, embedder.dims, csha, pgvector_text(v)),
                                 )
 
+                    # NER (regex, minimal): store extracted entities + links per chunk.
+                    for chunk_id, _csha, ctext in chunk_rows:
+                        ents = extract_entities_regex(ctext or "")
+                        if not ents:
+                            continue
+                        for entity_type, name in ents:
+                            cur.execute(
+                                """
+                                INSERT INTO tac.entities (entity_type, name)
+                                VALUES (%s, %s)
+                                ON CONFLICT (entity_type, name) DO UPDATE SET entity_type=excluded.entity_type
+                                RETURNING id
+                                """,
+                                (entity_type, name),
+                            )
+                            entity_id = int(cur.fetchone()[0])
+                            cur.execute(
+                                "INSERT INTO tac.chunk_entities (chunk_id, entity_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                                (chunk_id, entity_id),
+                            )
+
                     cur.execute(
                         "UPDATE op.jobs SET status='done', finished_at=now(), result=%s WHERE id=%s",
                         (Jsonb({"chunks": len(chunks)}), job_id),
                     )
                 conn.commit()
+            dt = max(0.001, time.time() - t0)
+            print(f"[worker] job={job_id} doc={doc_id} chunks={len(chunks)} dt={dt:.2f}s chunks_per_min={(len(chunks) / dt) * 60.0:.1f}")
         except Exception as e:
             with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
                 with conn.cursor() as cur:

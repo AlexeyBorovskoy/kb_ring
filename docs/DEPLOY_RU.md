@@ -52,11 +52,11 @@
 
 Переменные окружения (общие для API и worker):
 - `EMBEDDINGS_ENABLED=1`
-- `EMBEDDINGS_MODEL=sentence-transformers/all-MiniLM-L6-v2`
-- `EMBEDDINGS_DIMS=384`
+- `EMBEDDINGS_MODEL=sentence-transformers/multilingual-e5-base`
+- `EMBEDDINGS_DIMS=768`
 
 Миграции:
-- таблица embeddings на `vector(384)` задаётся в `kb_ring/db/migrations/004_local_embeddings.sql`.
+- таблица embeddings на `vector(768)` задаётся в `kb_ring/db/migrations/004_e5_embeddings_768.sql`.
   - В текущем виде миграция пересоздаёт `tac.embeddings` (если нужно без потерь данных, миграцию надо адаптировать).
 
 Индексы pgvector:

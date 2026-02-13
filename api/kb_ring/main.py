@@ -10,7 +10,9 @@ from .auth import AuthUser, create_access_token, token_from_header, verify_acces
 from .config import AUTH_COOKIE_DOMAIN, AUTH_COOKIE_NAME, AUTH_COOKIE_SECURE
 from .db import db_conn
 from .embeddings import get_embedder, pgvector_text
-from .llm import openai_chat_completion
+from .config import RERANK_TOP_M, RERANK_TOP_N
+from .llm import llm_chat_completion
+from .rerank_bge import Candidate, rerank
 from .retrieval import hybrid_retrieve
 
 
@@ -140,9 +142,9 @@ def search(
     embedder = get_embedder()
     qvec_txt: Optional[str] = None
     model: Optional[str] = None
-    if embedder is not None and int(getattr(embedder, "dims", 0) or 0) == 384:
+    if embedder is not None and int(getattr(embedder, "dims", 0) or 0) == 768:
         try:
-            qvec_txt = pgvector_text(embedder.embed_one(q))
+            qvec_txt = pgvector_text(embedder.embed_query(q))
             model = embedder.model_name
         except Exception:
             qvec_txt = None
@@ -168,13 +170,13 @@ def search(
                       vec AS (
                         SELECT
                           e.chunk_id AS chunk_id,
-                          (1.0 - (e.embedding <=> (%(qvec)s)::vector(384))) AS s_vec
+                          (1.0 - (e.embedding <=> (%(qvec)s)::vector(768))) AS s_vec
                         FROM tac.embeddings e
                         JOIN tac.chunks c ON c.id = e.chunk_id
                         JOIN tac.documents d ON d.id = c.document_id
                         WHERE d.user_id = %(user_id)s
                           AND e.model = %(model)s
-                        ORDER BY e.embedding <=> (%(qvec)s)::vector(384)
+                        ORDER BY e.embedding <=> (%(qvec)s)::vector(768)
                         LIMIT 200
                       ),
                       comb AS (
@@ -509,6 +511,7 @@ def ui(current_user: AuthUser = Depends(get_current_user)):
             <option value="search">search</option>
             <option value="rag">rag</option>
             <option value="analysis">analysis</option>
+            <option value="rag-tech">rag-tech</option>
           </select>
           <div class="hint">rag вызывает LLM и вернёт инженерный ответ с источниками.</div>
         </div>
@@ -576,7 +579,7 @@ def chat_get_session(
 async def chat_post_message(
     session_id: int,
     text: str = Form(...),
-    mode: Literal["search", "rag", "analysis"] = Form(default="search"),
+    mode: Literal["search", "rag", "analysis", "rag-tech"] = Form(default="search"),
     current_user: AuthUser = Depends(get_current_user),
 ):
     q = (text or "").strip()
@@ -598,9 +601,9 @@ async def chat_post_message(
             )
             user_message_id = int(cur.fetchone()[0])
 
-    # Retrieval (local): top-K chunks.
+    # Retrieval (local): top-N chunks (hybrid). Later: reranker.
     with db_conn() as conn:
-        retrieved = hybrid_retrieve(conn, current_user.user_id, q, top_k=15)
+        retrieved = hybrid_retrieve(conn, current_user.user_id, q, top_k=RERANK_TOP_N)
 
     def _display_uri(r) -> str:
         # Prefer canonical document URI; otherwise fall back to a stable pseudo-uri.
@@ -609,11 +612,29 @@ async def chat_post_message(
             return uri
         return f"chunk://{r.chunk_id}"
 
+    # Rerank top-N -> top-M for any "engineering answer" modes.
+    # Search mode can return the raw retrieval list, but we still rerank by default for better UX.
+    cand = [
+        Candidate(
+            chunk_id=r.chunk_id,
+            doc_id=r.doc_id,
+            title=r.title,
+            uri=r.uri,
+            content=r.content or "",
+            base_score=float(r.score or 0.0),
+        )
+        for r in retrieved
+    ]
+    reranked = rerank(q, cand, top_m=RERANK_TOP_M if mode != "search" else min(20, RERANK_TOP_M))
+    # Preserve at least some results for search mode even if reranker is disabled.
+    retrieved_used = reranked if reranked else cand[: (RERANK_TOP_M if mode != "search" else 20)]
+
     citations = []
-    for i, r in enumerate(retrieved, start=1):
+    for i, r in enumerate(retrieved_used, start=1):
         excerpt = (r.content or "").strip()
         if len(excerpt) > 500:
             excerpt = excerpt[:500] + "..."
+        final_score = float(r.rerank_score) if r.rerank_score is not None else float(r.base_score)
         citations.append(
             {
                 "n": i,
@@ -622,15 +643,17 @@ async def chat_post_message(
                 "title": r.title,
                 "uri": _display_uri(r),
                 "excerpt": excerpt,
-                "score": r.score,
+                "score": final_score,
+                "base_score": float(r.base_score),
+                "rerank_score": float(r.rerank_score) if r.rerank_score is not None else None,
             }
         )
 
     if mode == "search":
         return {"mode": "search", "results": citations, "user_message_id": user_message_id}
 
-    # mode == "rag|analysis": strict answer based only on retrieved chunks.
-    if not retrieved:
+    # mode == "rag|analysis|rag-tech": strict answer based only on retrieved chunks.
+    if not retrieved_used:
         answer_text = "данные не найдены"
         confidence = "low"
 
@@ -652,7 +675,7 @@ async def chat_post_message(
 
     # Формируем контекст как нумерованный список источников, чтобы модель могла ссылаться [1], [2], ...
     context_parts = []
-    for i, r in enumerate(retrieved, start=1):
+    for i, r in enumerate(retrieved_used, start=1):
         uri = _display_uri(r)
         hdr = f"[{i}] chunk_id={r.chunk_id} doc_id={r.doc_id}"
         if uri:
@@ -691,11 +714,30 @@ async def chat_post_message(
             + "Если есть несколько источников, сравни их и укажи расхождения.\n"
         )
         max_tokens = 900
+        allow_ollama = False
+    elif mode == "rag-tech":
+        system = (
+            system_common
+            + "\n"
+            + "Режим: RAG-TECH.\n"
+            + "Верни строгий инженерный отчёт. Обязательно включи таблицу интерфейсов/артефактов, затем разделы по подсистемам (REST/TCP/UI/...), затем Источники.\n"
+        )
+        max_tokens = 900
+        # Fallback to Ollama only for rag-tech (черновик), если OpenAI недоступен.
+        allow_ollama = True
     else:
         system = system_common + "\n" + "Режим: RAG ANSWER.\n"
         max_tokens = 700
+        allow_ollama = False
 
-    llm = await openai_chat_completion(system=system, user=q, context=context, temperature=0.1, max_tokens=max_tokens)
+    llm = await llm_chat_completion(
+        system=system,
+        user=q,
+        context=context,
+        temperature=0.1,
+        max_tokens=max_tokens,
+        allow_ollama_fallback=allow_ollama,
+    )
     answer_text = llm.text if llm else "данные не найдены"
 
     # Enforce sources section even if the model forgot to output it.
@@ -703,7 +745,7 @@ async def chat_post_message(
         src_lines = [f"[{c['n']}] chunk_id={c['chunk_id']} {c['uri']}" for c in citations]
         answer_text = (answer_text or "").rstrip() + "\n\nИсточники (обязательно)\n" + "\n".join(src_lines)
 
-    best_score = max((r.score for r in retrieved), default=0.0)
+    best_score = max((float(c.get("score") or 0.0) for c in citations), default=0.0)
     confidence = "high" if best_score >= 0.25 else ("medium" if best_score >= 0.12 else "low")
 
     # Save assistant + citations.
@@ -714,10 +756,10 @@ async def chat_post_message(
                 (session_id, answer_text),
             )
             assistant_message_id = int(cur.fetchone()[0])
-            for r in retrieved:
+            for c in citations:
                 cur.execute(
                     "INSERT INTO chat.message_citations (message_id, chunk_id, score) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                    (assistant_message_id, r.chunk_id, r.score),
+                    (assistant_message_id, int(c["chunk_id"]), float(c["score"] or 0.0)),
                 )
 
     return {

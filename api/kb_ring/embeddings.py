@@ -11,7 +11,10 @@ class Embedder:
     model_name: str
     dims: int
 
-    def embed_one(self, text: str) -> list[float]:
+    def embed_query(self, text: str) -> list[float]:
+        raise NotImplementedError
+
+    def embed_passage(self, text: str) -> list[float]:
         raise NotImplementedError
 
 
@@ -55,15 +58,21 @@ def get_embedder() -> Optional[Embedder]:
         def __init__(self):
             super().__init__(model_name=EMBEDDINGS_MODEL, dims=EMBEDDINGS_DIMS)
 
-        def embed_one(self, text: str) -> list[float]:
-            # SentenceTransformer returns numpy array.
-            vec = st.encode([text or ""], normalize_embeddings=True, batch_size=EMBEDDINGS_BATCH_SIZE)
+        def _encode_one(self, text: str) -> list[float]:
+            vec = st.encode([text], normalize_embeddings=True, batch_size=EMBEDDINGS_BATCH_SIZE)
             v = [float(x) for x in vec[0].tolist()]
-            # normalize_embeddings=True should already do this, but keep deterministic behavior.
             return _l2_normalize(v)
 
+        def embed_query(self, text: str) -> list[float]:
+            # E5 query embeddings: prefix "query: ".
+            return self._encode_one("query: " + (text or ""))
+
+        def embed_passage(self, text: str) -> list[float]:
+            # E5 passage embeddings: prefix "passage: ".
+            return self._encode_one("passage: " + (text or ""))
+
     emb = _StEmbedder()
-    if emb.dims and len(emb.embed_one("ping")) != emb.dims:
+    if emb.dims and len(emb.embed_query("ping")) != emb.dims:
         # If the env config is wrong, prefer disabling embeddings rather than crashing API.
         _EMBEDDER_ERR = f"embedding dims mismatch: expected {emb.dims}"
         return None
@@ -77,4 +86,3 @@ def pgvector_text(v: list[float]) -> str:
     Формат ввода pgvector: '[0.1,0.2,...]'. Удобно передавать как TEXT параметр.
     """
     return "[" + ",".join(f"{float(x):.8f}" for x in v) + "]"
-

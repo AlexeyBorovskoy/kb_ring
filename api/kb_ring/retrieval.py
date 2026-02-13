@@ -22,18 +22,19 @@ def hybrid_retrieve(conn, user_id: int, query: str, top_k: int = 15) -> list[Ret
     q = (query or "").strip()
     if not q:
         return []
-    top_k = max(1, min(20, int(top_k)))
+    # We use top-N for reranker (default 50). Keep a safe upper bound to avoid abuse.
+    top_k = max(1, min(200, int(top_k)))
 
     embedder = get_embedder()
     qvec_txt: Optional[str] = None
     model: Optional[str] = None
     if embedder is not None:
-        # DB schema currently fixed to vector(384). If config/model differs, fall back to FTS-only.
-        if int(getattr(embedder, "dims", 0) or 0) != 384:
+        # DB schema currently fixed to vector(768). If config/model differs, fall back to FTS-only.
+        if int(getattr(embedder, "dims", 0) or 0) != 768:
             embedder = None
         else:
             try:
-                qvec = embedder.embed_one(q)
+                qvec = embedder.embed_query(q)
                 qvec_txt = pgvector_text(qvec)
                 model = embedder.model_name
             except Exception:
@@ -64,13 +65,13 @@ def hybrid_retrieve(conn, user_id: int, query: str, top_k: int = 15) -> list[Ret
                   vec AS (
                     SELECT
                       e.chunk_id AS chunk_id,
-                      (1.0 - (e.embedding <=> (%(qvec)s)::vector(384))) AS s_vec
+                      (1.0 - (e.embedding <=> (%(qvec)s)::vector(768))) AS s_vec
                     FROM tac.embeddings e
                     JOIN tac.chunks c ON c.id = e.chunk_id
                     JOIN tac.documents d ON d.id = c.document_id
                     WHERE d.user_id = %(user_id)s
                       AND e.model = %(model)s
-                    ORDER BY e.embedding <=> (%(qvec)s)::vector(384)
+                    ORDER BY e.embedding <=> (%(qvec)s)::vector(768)
                     LIMIT 200
                   ),
                   comb AS (

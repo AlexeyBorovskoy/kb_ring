@@ -1,5 +1,5 @@
--- KB-RING миграция 004: локальные embeddings (sentence-transformers) + pgvector.
--- Важно: таблица tac.embeddings была каркасом. Миграция делает её пригодной для локальной модели 384 dims.
+-- KB-RING миграция 004: локальные embeddings E5 (768 dims) + pgvector.
+-- Важно: миграция пересоздаёт tac.embeddings. Если в таблице уже есть данные, сделайте backup/пересчёт.
 
 BEGIN;
 
@@ -13,7 +13,7 @@ CREATE TABLE tac.embeddings (
   model TEXT NOT NULL,
   dims INTEGER NOT NULL,
   chunk_sha256 TEXT,
-  embedding vector(384) NOT NULL,
+  embedding vector(768) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(chunk_id, model)
 );

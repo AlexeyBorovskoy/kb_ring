@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_tac_chunks_doc ON tac.chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_tac_chunks_tsv ON tac.chunks USING GIN (tsv);
 
 -- -----------------------------------------------------------------------------
--- tac.embeddings (pgvector)
+-- tac.embeddings (pgvector, локальные embeddings E5)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tac.embeddings (
   id BIGSERIAL PRIMARY KEY,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS tac.embeddings (
   model TEXT NOT NULL,
   dims INTEGER NOT NULL,
   chunk_sha256 TEXT,
-  embedding vector(384),               -- локальные sentence-transformers (all-MiniLM-L6-v2)
+  embedding vector(768),               -- локальные sentence-transformers (multilingual-e5-base)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(chunk_id, model)
 );
@@ -66,6 +66,24 @@ CREATE TABLE IF NOT EXISTS tac.embeddings (
 CREATE INDEX IF NOT EXISTS idx_tac_embeddings_chunk ON tac.embeddings(chunk_id);
 -- Индекс для cosine similarity (опционально; при больших объёмах включить ivfflat/hnsw тюнингом).
 CREATE INDEX IF NOT EXISTS idx_tac_embeddings_vec_cos ON tac.embeddings USING ivfflat (embedding vector_cosine_ops);
+
+-- -----------------------------------------------------------------------------
+-- tac.entities + tac.chunk_entities (NER)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tac.entities (
+  id BIGSERIAL PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(entity_type, name)
+);
+
+CREATE TABLE IF NOT EXISTS tac.chunk_entities (
+  chunk_id BIGINT NOT NULL REFERENCES tac.chunks(id) ON DELETE CASCADE,
+  entity_id BIGINT NOT NULL REFERENCES tac.entities(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(chunk_id, entity_id)
+);
 
 -- -----------------------------------------------------------------------------
 -- op.jobs: асинхронная обработка (ingest/index/enrich)

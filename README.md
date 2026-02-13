@@ -15,6 +15,7 @@ KB-RING — единый сервис корпоративных знаний: �
 - `Ответы системы.txt` — требования к строгому RAG Answer (обязательные citations, лимиты контекста, без выдумок).
 
 Сводка ограничений по RAG: `kb_ring/docs/ТРЕБОВАНИЯ_RAG.md`.
+CPU-only стек (E5 + BGE reranker + NER + Ollama fallback): `kb_ring/docs/LOCAL_AI_CPU_ONLY.md`.
 
 ## Архитектура (на сегодня)
 
@@ -36,7 +37,8 @@ KB-RING — единый сервис корпоративных знаний: �
 - `op.jobs`: очередь работ (`queued|running|done|error`).
 - `tac.documents`: документ знаний (текст + метаданные + `uri` как каноническая ссылка на источник).
 - `tac.chunks`: чанки + `tsvector` для FTS.
-- `tac.embeddings`: pgvector (локальные embeddings sentence-transformers, `vector(384)`).
+- `tac.embeddings`: pgvector (локальные embeddings E5, `vector(768)`).
+- `tac.entities`, `tac.chunk_entities`: NER (regex минимум; модель опционально).
 - `chat.sessions`, `chat.messages`, `chat.message_citations`, `chat.session_memory`: чат и источники ответов.
 
 Базовая схема: `kb_ring/db/schema.sql`  
@@ -68,6 +70,7 @@ KB-RING — единый сервис корпоративных знаний: �
   - `mode=search`: только retrieval, вернуть результаты (без LLM).
   - `mode=rag`: retrieval -> context -> ChatGPT -> ответ + citations.
   - `mode=analysis`: отчёт/сводка по найденным источникам через ChatGPT (опционально) + citations.
+  - `mode=rag-tech`: строгий инженерный отчёт (retrieval+rerank) + citations; допускается fallback на локальную Ollama, если OpenAI недоступен.
 
 Dev-хелпер (только для локальной отладки):
 - `POST /api/v1/dev/login` — выдаёт токен и ставит cookie.
@@ -108,9 +111,19 @@ kb_ring/scripts/dev_up.sh
 
 Локальные embeddings (по ТЗ; используются для hybrid retrieval, OpenAI embeddings не используются для retrieval):
 - `EMBEDDINGS_ENABLED`: `1/0` (по умолчанию `1`).
-- `EMBEDDINGS_MODEL`: по умолчанию `sentence-transformers/all-MiniLM-L6-v2`.
-- `EMBEDDINGS_DIMS`: по умолчанию `384` (должно совпадать со схемой БД).
+- `EMBEDDINGS_MODEL`: по умолчанию `sentence-transformers/multilingual-e5-base`.
+- `EMBEDDINGS_DIMS`: по умолчанию `768` (должно совпадать со схемой БД).
 - `EMBEDDINGS_BATCH_SIZE`: по умолчанию `32`.
+
+Reranker (локально, CPU):
+- `RERANK_ENABLED`: `1/0` (по умолчанию `1`).
+- `RERANK_MODEL`: по умолчанию `BAAI/bge-reranker-base`.
+- `RERANK_TOP_N`: по умолчанию `50`.
+- `RERANK_TOP_M`: по умолчанию `15`.
+
+Ollama (опционально):
+- `OLLAMA_BASE_URL`: по умолчанию `http://127.0.0.1:11434`
+- `OLLAMA_MODEL`: по умолчанию `mistral:7b-instruct-q4_K_M`
 
 ## Миграции БД
 

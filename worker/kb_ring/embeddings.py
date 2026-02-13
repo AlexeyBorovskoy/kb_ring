@@ -16,8 +16,8 @@ def _env_int(name: str, default: str) -> int:
 
 
 EMBEDDINGS_ENABLED = _env_bool("EMBEDDINGS_ENABLED", "1")
-EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDINGS_DIMS = _env_int("EMBEDDINGS_DIMS", "384")
+EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "sentence-transformers/multilingual-e5-base")
+EMBEDDINGS_DIMS = _env_int("EMBEDDINGS_DIMS", "768")
 EMBEDDINGS_BATCH_SIZE = _env_int("EMBEDDINGS_BATCH_SIZE", "32")
 
 
@@ -54,7 +54,9 @@ def get_embedder() -> Optional[Embedder]:
             super().__init__(model_name=EMBEDDINGS_MODEL, dims=EMBEDDINGS_DIMS)
 
         def embed_many(self, texts: list[str]) -> list[list[float]]:
-            vecs = st.encode(texts, normalize_embeddings=True, batch_size=EMBEDDINGS_BATCH_SIZE)
+            # E5 passage embeddings: prefix "passage: ".
+            batch = ["passage: " + (t or "") for t in texts]
+            vecs = st.encode(batch, normalize_embeddings=True, batch_size=EMBEDDINGS_BATCH_SIZE)
             return [[float(x) for x in v.tolist()] for v in vecs]
 
     emb = _StEmbedder()
@@ -72,4 +74,3 @@ def get_embedder() -> Optional[Embedder]:
 
 def pgvector_text(v: list[float]) -> str:
     return "[" + ",".join(f"{float(x):.8f}" for x in v) + "]"
-
