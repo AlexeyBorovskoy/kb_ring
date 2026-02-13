@@ -16,6 +16,8 @@ KB-RING — единый сервис корпоративных знаний: �
 
 Сводка ограничений по RAG: `kb_ring/docs/ТРЕБОВАНИЯ_RAG.md`.
 CPU-only стек (E5 + BGE reranker + NER + Ollama fallback): `kb_ring/docs/LOCAL_AI_CPU_ONLY.md`.
+План системы: `kb_ring/docs/PLAN_SYSTEM.md`.
+План шага 1 (сервер Нила): `kb_ring/docs/PLAN_STEP1_NIL_SERVER.md`.
 
 ## Архитектура (на сегодня)
 
