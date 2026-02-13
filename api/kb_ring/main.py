@@ -13,7 +13,7 @@ from .llm import openai_chat_completion
 from .retrieval import hybrid_retrieve
 
 
-# Load .env when running outside docker (local dev convenience)
+# Загружаем .env при запуске вне Docker (удобство для локальной разработки)
 load_dotenv(override=False)
 
 app = FastAPI(title="KB-RING API", version="0.0.1")
