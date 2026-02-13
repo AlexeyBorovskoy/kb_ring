@@ -1,0 +1,20 @@
+services:
+  portal_auth:
+    image: kb_portal_auth:local
+    container_name: kb_portal_auth
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-}
+      AUTH_COOKIE_NAME: auth_token
+      AUTH_COOKIE_DOMAIN: ""
+      AUTH_COOKIE_SECURE: "1"
+      # Yandex OAuth
+      YANDEX_OAUTH_CLIENT_ID: ${YANDEX_OAUTH_CLIENT_ID:-}
+      YANDEX_OAUTH_CLIENT_SECRET: ${YANDEX_OAUTH_CLIENT_SECRET:-}
+      BASE_URL: ${BASE_URL:-https://kb.<IP>.nip.io}
+    ports:
+      - "127.0.0.1:${PORTAL_AUTH_HOST_PORT:-8090}:8090"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]
+    cpus: "${PORTAL_CPUS:-0.5}"
+    mem_limit: "${PORTAL_MEM_LIMIT:-512m}"
+

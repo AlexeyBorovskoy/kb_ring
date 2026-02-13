@@ -1,0 +1,38 @@
+# Single domain + subpaths (Step 1)
+#
+# Replace <IP> with the server IP (e.g. 89.124.65.229).
+#
+# Goals:
+# - one FQDN: kb.<IP>.nip.io
+# - portal at /
+# - KB-RING at /kb
+# - TG at /tg
+# - transcription at /transcription
+#
+# IMPORTANT:
+# - For subpath apps you typically need both:
+#   - strip prefix in proxy (handle_path)
+#   - set root_path/base_url in the upstream (uvicorn --root-path, and/or adjust frontend)
+
+kb.<IP>.nip.io {
+  # Portal + auth (Yandex OAuth -> JWT cookie)
+  handle / {
+    reverse_proxy 127.0.0.1:8090
+  }
+
+  # KB-RING
+  handle_path /kb/* {
+    reverse_proxy 127.0.0.1:8099
+  }
+
+  # TG Digest web (FastAPI) under /tg
+  handle_path /tg/* {
+    reverse_proxy 127.0.0.1:8000
+  }
+
+  # Transcription under /transcription
+  handle_path /transcription/* {
+    reverse_proxy 127.0.0.1:8081
+  }
+}
+

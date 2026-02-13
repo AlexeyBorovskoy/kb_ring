@@ -1,0 +1,74 @@
+services:
+  kb_postgres:
+    image: pgvector/pgvector:pg16
+    container_name: kb_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kb_ring
+      POSTGRES_USER: kb_ring
+      POSTGRES_PASSWORD: ${KB_POSTGRES_PASSWORD:-kb_ring_local_change_me}
+    ports:
+      - "127.0.0.1:${KB_POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - kb_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kb_ring -d kb_ring"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kb_api:
+    image: kb_ring_api:local
+    container_name: kb_api
+    restart: unless-stopped
+    depends_on:
+      kb_postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://kb_ring:${KB_POSTGRES_PASSWORD:-kb_ring_local_change_me}@kb_postgres:5432/kb_ring
+      JWT_SECRET: ${JWT_SECRET:-}
+      AUTH_COOKIE_NAME: auth_token
+      AUTH_COOKIE_DOMAIN: ""
+      AUTH_COOKIE_SECURE: "1"
+      # CPU-only stack
+      EMBEDDINGS_ENABLED: "1"
+      EMBEDDINGS_MODEL: sentence-transformers/multilingual-e5-base
+      EMBEDDINGS_DIMS: "768"
+      RERANK_ENABLED: "1"
+      RERANK_MODEL: BAAI/bge-reranker-base
+      RERANK_TOP_N: "50"
+      RERANK_TOP_M: "15"
+      # LLM modes
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral:7b-instruct-q4_K_M}
+    ports:
+      - "127.0.0.1:${KB_API_HOST_PORT:-8099}:8099"
+    command: ["uvicorn", "kb_ring.main:app", "--host", "0.0.0.0", "--port", "8099"]
+    # Resource limits: tune for <= 30% server budget (Step 1)
+    cpus: "${KB_API_CPUS:-1.0}"
+    mem_limit: "${KB_API_MEM_LIMIT:-2g}"
+
+  kb_worker:
+    image: kb_ring_worker:local
+    container_name: kb_worker
+    restart: unless-stopped
+    depends_on:
+      kb_postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://kb_ring:${KB_POSTGRES_PASSWORD:-kb_ring_local_change_me}@kb_postgres:5432/kb_ring
+      # CPU-only stack
+      EMBEDDINGS_ENABLED: "1"
+      EMBEDDINGS_MODEL: sentence-transformers/multilingual-e5-base
+      EMBEDDINGS_DIMS: "768"
+      EMBEDDINGS_BATCH_SIZE: "16"
+    command: ["python", "-m", "kb_ring.worker_main"]
+    cpus: "${KB_WORKER_CPUS:-2.0}"
+    mem_limit: "${KB_WORKER_MEM_LIMIT:-4g}"
+
+volumes:
+  kb_postgres_data:
+    name: kb_postgres_data
+
