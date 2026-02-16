@@ -20,8 +20,18 @@
   - compose для `portal_auth` (если не хотим systemd)
 - `generate_tg_schema_restore_sql.sh`
   - из `pg_dump -Fc` делает SQL-скрипт восстановления в схему `tg` (через `SET search_path`)
+- `restore_tg_dump_to_kb_ring.sh`
+  - восстанавливает `pg_dump -Fc` в `kb_ring` c ремапом `public.* -> tg.*`
 - `tg_etl_placeholder.md`
   - что именно материализуем из `tg.*` в `tac.documents` на шаге 1 (все: сообщения/дайджесты/вложения)
+- `check_server_access.sh`
+  - проверка SSH-доступа и обязательных путей/сервисов на Ниле и TG сервере
+- `prepare_nil_layout.sh`
+  - создаёт целевые каталоги `/opt/kb-ring` и `/opt/tg_digest_system` на Ниле
+- `patch_tg_subpath.sh`
+  - патчит TG web под `/tg` (redirects + frontend absolute links/fetch)
+- `patch_transcription_subpath.sh`
+  - патчит transcription frontend под `/transcription` (absolute fetch paths)
 
 ## Нужные входные данные (уже выгружаем скриптами)
 
@@ -45,3 +55,14 @@
   - переносить media выборочно, либо
   - переносить целиком (дольше, но проще), затем ETL/индексация уже на Ниле.
 
+## Порядок запуска (минимум)
+
+1. Проверить доступы:
+   - `bash kb_ring/ops/step1_nil/check_server_access.sh`
+2. Подготовить каталоги на Ниле:
+   - `NIL_SSH=vps-ripas-229 bash kb_ring/ops/step1_nil/prepare_nil_layout.sh`
+3. Применить subpath-патчи:
+   - `WEB_DIR=/opt/tg_digest_system/tg_digest_system/web bash kb_ring/ops/step1_nil/patch_tg_subpath.sh`
+   - `TRANSCRIPTION_DIR=/opt/transcription bash kb_ring/ops/step1_nil/patch_transcription_subpath.sh`
+4. Восстановить TG dump в `kb_ring`:
+   - `DUMP=.../tg_digest.dump DATABASE_URL=postgresql://.../kb_ring bash kb_ring/ops/step1_nil/restore_tg_dump_to_kb_ring.sh`

@@ -26,13 +26,22 @@ kb.<IP>.nip.io {
   }
 
   # TG Digest web (FastAPI) under /tg
+  handle /tg {
+    redir /tg/ 308
+  }
   handle_path /tg/* {
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy 127.0.0.1:8000 {
+      header_up X-Forwarded-Prefix /tg
+    }
   }
 
   # Transcription under /transcription
+  handle /transcription {
+    redir /transcription/ 308
+  }
   handle_path /transcription/* {
-    reverse_proxy 127.0.0.1:8081
+    reverse_proxy 127.0.0.1:8081 {
+      header_up X-Forwarded-Prefix /transcription
+    }
   }
 }
-
