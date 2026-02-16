@@ -57,7 +57,12 @@ kv "Kernel" "$(uname -r)"
 section "CPU"
 if have nproc; then kv "nproc" "$(nproc)"; fi
 if have lscpu; then
-  lscpu | egrep -i 'Model name|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|Socket\\(s\\)' | sed 's/^/  /' | tee -a "${REPORT}"
+  # Force English output to keep parsing stable across locales (Mint can be non-English).
+  # Also: never fail the whole script if grep finds nothing.
+  LC_ALL=C lscpu \
+    | grep -E -i 'Model name|CPU\\(s\\)|Thread\\(s\\) per core|Core\\(s\\) per socket|Socket\\(s\\)' \
+    | sed 's/^/  /' \
+    | tee -a "${REPORT}" || true
 else
   warn "lscpu not found"
 fi
@@ -121,8 +126,20 @@ print("Embed ok, dt=%.2fs" % (time.time() - t0))
 
 print("Loading rerank model:", rerank_model)
 t1 = time.time()
-_ = SentenceTransformer(rerank_model, device="cpu")
-print("Rerank model loaded (load-smoke), dt=%.2fs" % (time.time() - t1))
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    tok = AutoTokenizer.from_pretrained(rerank_model)
+    model = AutoModelForSequenceClassification.from_pretrained(rerank_model)
+    model.eval()
+    with torch.no_grad():
+        inputs = tok("query", "doc a", return_tensors="pt", truncation=True)
+        logits = model(**inputs).logits
+        score = float(logits.squeeze().detach().cpu().item())
+    print("Rerank score (smoke):", score)
+    print("Rerank ok, dt=%.2fs" % (time.time() - t1))
+except Exception as e:
+    print("Rerank test WARN:", str(e))
 PY
 else
   section "Model Tests"
@@ -137,4 +154,3 @@ if (( fail_count > 0 )); then
   exit 1
 fi
 say "Overall: OK (see ${REPORT})"
-
