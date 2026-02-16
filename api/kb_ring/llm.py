@@ -52,12 +52,20 @@ async def llm_chat_completion(system: str, user: str, context: str, temperature:
     - (опц.) Ollama fallback (локальные черновики)
     """
     if OPENAI_API_KEY:
-        return await openai_chat_completion(system=system, user=user, context=context, temperature=temperature, max_tokens=max_tokens)
+        try:
+            return await openai_chat_completion(system=system, user=user, context=context, temperature=temperature, max_tokens=max_tokens)
+        except Exception:
+            # Не роняем API из-за внешнего LLM-провайдера.
+            return None
     if allow_ollama_fallback:
         try:
             from .ollama import ollama_chat_completion  # lazy import
         except Exception:
             return None
-        ans = await ollama_chat_completion(system=system, user=user, context=context, temperature=temperature, max_tokens=max_tokens)
+        try:
+            ans = await ollama_chat_completion(system=system, user=user, context=context, temperature=temperature, max_tokens=max_tokens)
+        except Exception:
+            # Если Ollama недоступна, возвращаем None и позволяем вызывающему отдать fallback-ответ.
+            return None
         return LlmAnswer(text=ans.text) if ans else None
     return None
