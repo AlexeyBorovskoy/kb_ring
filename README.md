@@ -1,182 +1,144 @@
 # KB-RING
 
-KB-RING — единый сервис корпоративных знаний: ингест (загрузка) источников, индексация, поиск, чат/RAG и (позже) связывание сущностей.
+KB-RING — единая система знаний, которая объединяет TG Digest и transcription в общий контур: общая авторизация, общая БД, единый поиск и инженерный RAG с обязательными citations.
 
-Этот репозиторий создаётся как “новый проект”, но намеренно опирается на существующие наработки:
-- модель идентификации как в TG Digest System (JWT в `auth_token`, `sub = user_id`);
-- PostgreSQL + pgvector как единое хранилище;
-- практики “ops-пакета” и повторяемого деплоя.
+Обновлено: 2026-02-16.
 
-## Ключевые документы (что считаем источником требований)
+## 1. Текущее состояние проекта
 
-Локальные файлы (shared_vm):
-- `Единая система знаний ТЗ.txt` — целевая архитектура KB-RING (слои op/tac/arc, инкрементальность, FTS + векторный поиск).
-- `запросы по kb.txt` — требования к чат-режиму поверх базы (режимы search-only/rag, hybrid retrieval).
-- `Ответы системы.txt` — требования к строгому RAG Answer (обязательные citations, лимиты контекста, без выдумок).
+Сделано:
+- Подготовлен каркас сервиса `api + worker + postgres(pgvector)`.
+- Принято целевое решение по домену: один FQDN, вход через общий портал, сервисы под `subpath`.
+- Подготовлен локальный набор `ops/step1_nil/*` для минимальной нагрузки на сервер Нила.
+- Подтверждён формат миграции TG: `pg_dump -Fc` (custom) + восстановление в схему `tg` внутри БД `kb_ring`.
+- Подтверждена цель шага 1: индексировать данные из TG и transcription в единую модель документов.
+- Для OCR в TG-контуре зафиксирован профиль: `OCR.space` как primary + `tesseract` fallback.
 
-Сводка ограничений по RAG: `kb_ring/docs/ТРЕБОВАНИЯ_RAG.md`.
-CPU-only стек (E5 + BGE reranker + NER + Ollama fallback): `kb_ring/docs/LOCAL_AI_CPU_ONLY.md`.
-План системы: `kb_ring/docs/PLAN_SYSTEM.md`.
-План шага 1 (сервер Нила): `kb_ring/docs/PLAN_STEP1_NIL_SERVER.md`.
+В работе (до команды на деплой):
+- Финальная локальная валидация полного цикла (`ingest -> index -> search/rag-tech`).
+- Подготовка контролируемого запуска на сервере Нила без удаления действующих контуров до отдельного подтверждения.
 
-## Архитектура (на сегодня)
+## 2. Зафиксированные решения
+
+- Один целевой домен (одна главная страница входа).
+- Маршрутизация через пути:
+  - `/kb` — KB-RING
+  - `/tg` — TG web
+  - `/transcription` — transcription web
+- Шаг 1 выполняется без «большого» рефакторинга TG/transcription: сначала совместимость и миграция, потом оптимизация.
+- Новая БД: `kb_ring`, при этом все данные TG должны помещаться в эту БД (схема `tg` + материализация в `tac`).
+- Индексация вложений TG на шаге 1: минимум `pdf`, `jpg/png`, `docx`, `txt/md/html`; OCR обязателен.
+- Нагрузка AI-процессов ограничивается: не более ~30% ресурсов сервера через docker limits + контроль параллелизма.
+
+## 3. Целевая архитектура
 
 Компоненты:
-- **API** (`kb_ring/api/`): FastAPI, входная точка `kb_ring/api/kb_ring/main.py`.
-- **Worker** (`kb_ring/worker/`): фоновая обработка `op.jobs` (чанклинг + FTS + локальные embeddings).
-- **БД** (`kb_ring/db/`): PostgreSQL + pgvector.
+1. `portal_auth` (Yandex OAuth) — логин и выпуск JWT.
+2. `KB-RING API` (`api/kb_ring/main.py`) — ingest, поиск, чат, citations.
+3. `KB-RING Worker` (`worker/`) — chunking, embeddings, rerank/NER-пайплайн.
+4. `PostgreSQL + pgvector` (`db/`) — единое хранилище `op/tac/chat` + `tg`.
+5. `TG Digest` — источник данных и UI под `/tg`.
+6. `transcription` — источник markdown-документов под `/transcription`.
 
-Пока это “скелет”, чтобы начать переписывать TG и transcription как части единого сервиса знаний.
+Логический поток:
+- источник (TG/transcription) -> `tac.documents` -> `op.jobs` -> `tac.chunks` -> `tac.embeddings` -> retrieval/rerank -> ответ с citations.
 
-## Модель данных
+## 4. Модель данных (минимальный обязательный слой)
 
-### Схемы
-- `op` — оперативный слой (ingest/курсор/джобы).
-- `tac` — тактический слой (документы знаний, чанки, эмбеддинги).
-- `chat` — чат/сессии/история + citations.
+Схемы:
+- `op` — очередь и служебные процессы.
+- `tac` — документы знаний, чанки, эмбеддинги, сущности.
+- `chat` — сессии, сообщения, citations.
+- `tg` — восстановленная схема и данные TG после миграции.
 
-### Таблицы (минимум)
-- `op.jobs`: очередь работ (`queued|running|done|error`).
-- `tac.documents`: документ знаний (текст + метаданные + `uri` как каноническая ссылка на источник).
-- `tac.chunks`: чанки + `tsvector` для FTS.
-- `tac.embeddings`: pgvector (локальные embeddings E5, `vector(768)`).
-- `tac.entities`, `tac.chunk_entities`: NER (regex минимум; модель опционально).
-- `chat.sessions`, `chat.messages`, `chat.message_citations`, `chat.session_memory`: чат и источники ответов.
+Ключевые таблицы:
+- `op.jobs`
+- `tac.documents`
+- `tac.chunks`
+- `tac.embeddings`
+- `tac.entities`, `tac.chunk_entities`
+- `chat.sessions`, `chat.messages`, `chat.message_citations`, `chat.session_memory`
 
-Базовая схема: `kb_ring/db/schema.sql`  
-Миграции: `kb_ring/db/migrations/`
+Базовая схема: `db/schema.sql`.
+Миграции: `db/migrations/`.
 
-## Авторизация (как в TG)
+## 5. Авторизация и единый вход
 
-Текущее правило:
-- токен берём из cookie `auth_token` или `Authorization: Bearer ...`;
-- JWT подписан общим `JWT_SECRET`;
-- `sub` в токене — это `user_id` (целое число).
+- Токен: JWT (HS256).
+- Cookie: `auth_token`.
+- Источник идентичности: `sub = user_id` (совместимость с TG-подходом).
+- Общие секреты задаются только через серверный `secrets.env`, не через git.
 
-Это нужно, чтобы затем без “второй модели пользователей” объединить:
-- TG: его `users/user_identities/audit_log`;
-- transcription: все задания/результаты и индексы хранить с привязкой к `user_id`.
-
-## API (этап 0/1)
+## 6. API (этап 0/1)
 
 Базовые эндпоинты:
-- `GET /health` — healthcheck (проверка живости).
-- `GET /ui` — минимальный UI (вкладка **ПОИСК** + **INGEST**).
-- `POST /api/v1/ingest/transcript` — сохранить транскрипт в БД и поставить задачу индексации.
-- `GET /api/v1/search?q=...` — FTS поиск по `tac.chunks` (без LLM).
+- `GET /health`
+- `GET /ui`
+- `POST /api/v1/ingest/transcript`
+- `GET /api/v1/search`
 
-Чат над базой:
-- `POST /api/v1/chat/sessions` — создать сессию.
-- `GET /api/v1/chat/sessions/{id}` — получить историю.
-- `POST /api/v1/chat/sessions/{id}/message` — отправить сообщение:
-  - `mode=search`: только retrieval, вернуть результаты (без LLM).
-  - `mode=rag`: retrieval -> context -> ChatGPT -> ответ + citations.
-  - `mode=analysis`: отчёт/сводка по найденным источникам через ChatGPT (опционально) + citations.
-  - `mode=rag-tech`: строгий инженерный отчёт (retrieval+rerank) + citations; допускается fallback на локальную Ollama, если OpenAI недоступен.
+Чат:
+- `POST /api/v1/chat/sessions`
+- `GET /api/v1/chat/sessions/{id}`
+- `POST /api/v1/chat/sessions/{id}/message` (`search|rag|analysis|rag-tech`)
 
-Dev-хелпер (только для локальной отладки):
-- `POST /api/v1/dev/login` — выдаёт токен и ставит cookie.
+Требование: `rag-tech` всегда возвращает citations.
 
-## Локальный запуск
+## 7. OCR и извлечение вложений
 
-### Вариант A: docker-compose (если совместим)
+Для шага 1:
+- Primary OCR: `OCR.space`.
+- Fallback: локальный `tesseract`.
+- Режим загрузки OCR-задач: последовательный (для устойчивости cloud OCR и контроля ресурсов).
 
+Планируемая эволюция:
+- HF endpoint допускается как дополнительный OCR/vision backend, но не обязателен для шага 1.
+
+## 8. Локальный запуск
+
+Вариант A:
 ```bash
-cd kb_ring/docker
+cd docker
 cp .env.example .env
 docker compose up -d --build
 ```
 
-### Вариант B: без docker-compose (рекомендуется в этой VM)
-
+Вариант B:
 ```bash
-kb_ring/scripts/dev_down.sh
-kb_ring/scripts/dev_up.sh
+scripts/dev_down.sh
+scripts/dev_up.sh
 ```
 
 Проверка:
-- API: `http://127.0.0.1:8099/health`
-- UI: `http://127.0.0.1:8099/ui`
+- `http://127.0.0.1:8099/health`
+- `http://127.0.0.1:8099/ui`
 
-## Переменные окружения (минимум)
+## 9. Что подготовлено для шага 1
 
-Файл для локальной разработки: `kb_ring/docker/.env` (не коммитится).
+Каталог `ops/step1_nil/` содержит:
+- compose и Caddy шаблоны;
+- проверку доступов к серверам;
+- подготовку директорий на сервере Нила;
+- восстановление TG дампа `-Fc` в `kb_ring` с ремапом в `tg`;
+- патчи для subpath (`/tg`, `/transcription`).
 
-- `DATABASE_URL`: строка подключения к Postgres.
-- `JWT_SECRET`: общий секрет подписи JWT (должен совпадать у всех сервисов в едином контуре).
-- `AUTH_COOKIE_NAME`: по умолчанию `auth_token`.
-- `AUTH_COOKIE_DOMAIN`: домен cookie (для SSO по поддоменам на сервере).
-- `AUTH_COOKIE_SECURE`: `1/0`, признак `Secure` у cookie.
-- `OPENAI_API_KEY`: ключ OpenAI (нужен только для `mode=rag|analysis`).
-- `OPENAI_BASE_URL`: базовый URL API (обычно `https://api.openai.com/v1`).
-- `OPENAI_MODEL`: модель для ответа (например `gpt-4o-mini`).
+Подробно: `ops/step1_nil/README.md`.
 
-Локальные embeddings (по ТЗ; используются для hybrid retrieval, OpenAI embeddings не используются для retrieval):
-- `EMBEDDINGS_ENABLED`: `1/0` (по умолчанию `1`).
-- `EMBEDDINGS_MODEL`: по умолчанию `sentence-transformers/multilingual-e5-base`.
-- `EMBEDDINGS_DIMS`: по умолчанию `768` (должно совпадать со схемой БД).
-- `EMBEDDINGS_BATCH_SIZE`: по умолчанию `32`.
+## 10. Критерии готовности шага 1 (DoD)
 
-Reranker (локально, CPU):
-- `RERANK_ENABLED`: `1/0` (по умолчанию `1`).
-- `RERANK_MODEL`: по умолчанию `BAAI/bge-reranker-base`.
-- `RERANK_TOP_N`: по умолчанию `50`.
-- `RERANK_TOP_M`: по умолчанию `15`.
+Шаг 1 считается закрытым, если одновременно выполняются пункты:
+1. Единый домен и вход через портал работают.
+2. TG и transcription доступны и корректно работают под `subpath`.
+3. БД `kb_ring` создана, TG-данные импортированы в схему `tg`.
+4. Документы из TG и transcription индексируются в `tac`.
+5. Поиск и `rag-tech` возвращают корректные citations.
+6. Нагрузка AI-процессов контролируется и не выходит за согласованный бюджет ресурсов.
 
-Ollama (опционально):
-- `OLLAMA_BASE_URL`: по умолчанию `http://127.0.0.1:11434`
-- `OLLAMA_MODEL`: по умолчанию `mistral:7b-instruct-q4_K_M`
+## 11. Главные документы проекта
 
-## Миграции БД
-
-В локальном окружении базовая схема создаётся из `kb_ring/db/schema.sql`.
-
-Отдельные миграции лежат в `kb_ring/db/migrations/` и должны применяться к “живой” БД инкрементально.
-
-## Как устроен поиск (этап 1)
-
-- Воркер режет `tac.documents.body_text` на чанки и пишет их в `tac.chunks`.
-- Для каждого чанка строится `tsvector` (`to_tsvector('simple', chunk_text)`).
-- Для каждого чанка воркер (если установлены зависимости) считает локальные embeddings и пишет их в `tac.embeddings`.
-- `GET /api/v1/search` делает hybrid retrieval: FTS + pgvector cosine similarity (если embeddings доступны), иначе FTS-only.
-
-Примечание: индексация embeddings по chunk_sha256 инкрементальная (если чанк не изменился, пересчёт пропускается).
-
-## Как устроен RAG (этап 1)
-
-В `POST /api/v1/chat/sessions/{id}/message` при `mode=rag|analysis`:
-1. Выполняется retrieval (hybrid, top-K).
-2. Формируется `context` только из top-K чанков (без целых документов).
-3. Вызывается ChatGPT/OpenAI.
-4. Сохраняется ответ и связи `assistant message -> chunk_id` в `chat.message_citations`.
-5. Возвращается JSON: `answer + confidence + citations`.
-
-Ограничения и формат ответа: `kb_ring/docs/ТРЕБОВАНИЯ_RAG.md`.
-
-## Безопасность (минимум)
-
-- Не коммитить `kb_ring/docker/.env` и любые секреты (файл в `.gitignore`).
-- В прод-контуре не хранить ключи в репозитории.
-- LLM вызывается только в `mode=rag` (search-only должен работать без LLM).
-
-## Примечания по текущему состоянию
-
-- Локальные embeddings используют `sentence-transformers` и требуют установки зависимостей (torch). Если их нет, поиск работает в FTS-only режиме.
-- Для работы `mode=rag|analysis` требуется `OPENAI_API_KEY` в `kb_ring/docker/.env` (этот файл в `.gitignore`).
-- Вся документация и комментарии в коде ведутся на русском языке (требование проекта).
-
-## План ближайших работ (в рамках переписывания TG + transcription)
-
-1. Единая БД на сервере Нила (Postgres+pgvector) и миграция боевого TG (БД + `telethon.session` + конфиги).
-2. Переписать transcription:
-   - хранить задания/результаты в `op.*`;
-   - хранить документы знаний в `tac.*`;
-   - делать индексацию/обогащение как jobs;
-   - авторизация только через `auth_token` как в TG.
-3. Hybrid retrieval:
-   - FTS + pgvector similarity;
-   - объединённый скоринг;
-   - топ-K чанков для контекста (<=20).
-4. UI:
-   - полноценная вкладка “ПОИСК”;
-   - вкладка “ЧАТ (RAG)” с раскрываемыми citations.
+- `docs/PLAN_SYSTEM.md` — сводный план всей системы.
+- `docs/PLAN_STEP1_NIL_SERVER.md` — подробный план шага 1.
+- `docs/DEPLOY_RU.md` — практический runbook деплоя/проверки.
+- `docs/LOCAL_AI_CPU_ONLY.md` — локальный AI-стек на CPU.
+- `docs/ТРЕБОВАНИЯ_RAG.md` — требования к RAG и формату ответа.
+- `ops/step1_nil/README.md` — пакет локальной подготовки и миграции.

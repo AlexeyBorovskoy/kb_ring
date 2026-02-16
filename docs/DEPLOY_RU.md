@@ -1,63 +1,149 @@
-# Деплой (черновик)
+# KB-RING: Деплой и Проверка (Runbook)
 
-Цель: развернуть KB-RING как единый сервис знаний на сервере Нила, при этом:
-- мигрировать боевой TG Digest System вместе с данными БД и доступами (Telethon session);
-- переписать/встроить transcription как источник документов знаний;
-- иметь единый вход (как в TG) и единый поиск/чат.
+Дата актуализации: 2026-02-16
 
-## Принципиальная схема
+Документ описывает практический порядок действий для тестового развертывания и проверки готовности перед деплоем на сервер Нила.
 
-- Один PostgreSQL + pgvector (единый для всех частей).
-- Один Caddy (reverse proxy) с поддоменами:
-  - `portal.<ip>.nip.io` (позже: единая точка входа через Яндекс OAuth)
-  - `kb.<ip>.nip.io` (UI + API знаний)
-  - `tg.<ip>.nip.io` (TG UI, если оставляем отдельным сервисом)
-  - `transcription.<ip>.nip.io` (транскрипция, если оставляем отдельным UI)
+## 1. Принципы выполнения
 
-На этапе 1 допускается упростить:
-- оставить один домен `kb.<ip>.nip.io`, а TG/transcription интегрировать как вкладки внутри KB-RING.
+1. Сначала локальная подготовка, потом сервер.
+2. Никакого деплоя без явной команды владельца проекта.
+3. Все секреты только на сервере, не в git.
+4. Любое изменение на сервере должно быть воспроизводимо через скрипты/документы из репозитория.
 
-## Что переносим из боевого TG (93.77.185.71)
+## 2. Целевая топология шага 1
 
-По факту боевого контура:
-- docker-compose живёт в `/home/yc-user/tg_digest_system/tg_digest_system/docker`
-- контейнеры: `tg_digest_postgres`, `tg_digest_web`, `tg_digest_worker`
-- volume-ы:
-  - `tg_digest_postgres_data` (Postgres)
-  - `tg_digest_worker_data` (внутри лежит `/app/data/telethon.session`)
-  - `tg_digest_worker_media`, `tg_digest_worker_logs`
-- конфиги/промпты: bind-mount с хоста:
-  - `/home/yc-user/tg_digest_system/tg_digest_system/config`
-  - `/home/yc-user/tg_digest_system/tg_digest_system/prompts`
+- Один домен (single FQDN), единая точка входа.
+- Path routing:
+  - `/kb` -> KB-RING
+  - `/tg` -> TG web
+  - `/transcription` -> transcription web
+- Единая БД `kb_ring` (postgres + pgvector):
+  - `op/tac/chat` для KB-RING
+  - `tg` для восстановленного слоя TG
 
-Минимальный перенос для сохранения работоспособности TG:
-1. Дамп БД `tg_digest`
-2. Файл `telethon.session`
-3. `config/channels.json` и промпты
+## 3. Что должно быть готово локально
 
-## Примечание про секреты
+Папка `ops/step1_nil/`:
+- `docker-compose.kb_ring.yml`
+- `Caddyfile.kb_single_domain.snippet`
+- `check_server_access.sh`
+- `prepare_nil_layout.sh`
+- `restore_tg_dump_to_kb_ring.sh`
+- `patch_tg_subpath.sh`
+- `patch_transcription_subpath.sh`
 
-Не хранить реальные секреты в git.
-Для сервера держать `.env`/`secrets.env` только на хосте (например `/opt/kb-ring/`), права 600.
+Экспорты в `server_exports/`:
+- TG: дамп `-Fc`, служебные артефакты.
+- Nil: конфиги и рабочие данные (по согласованному списку).
 
-## Embeddings + hybrid retrieval (локально, по ТЗ)
+## 4. Серверные пути (для шага 1)
 
-Требование: embeddings считаются локально (sentence-transformers), а поиск использует:
-- FTS по `tac.chunks.tsv`
-- cosine similarity по `tac.embeddings.embedding` (pgvector)
+- TG-стек: `/opt/tg_digest_system/`
+- KB-RING: `/opt/kb-ring/`
+- Секреты:
+  - `/opt/tg_digest_system/.../secrets.env`
+  - `/opt/kb-ring/secrets.env`
 
-Практика:
-- воркер пишет embeddings при индексации документа (по `chunk_sha256`, инкрементально);
-- API использует hybrid retrieval там, где доступен эмбеддер; иначе работает в режиме FTS-only.
+## 5. Миграция TG в `kb_ring`
 
-Переменные окружения (общие для API и worker):
-- `EMBEDDINGS_ENABLED=1`
-- `EMBEDDINGS_MODEL=sentence-transformers/multilingual-e5-base`
-- `EMBEDDINGS_DIMS=768`
+1. Подготовить/проверить `pg_dump -Fc`.
+2. Поднять postgres с `pgvector`.
+3. Создать БД `kb_ring`.
+4. Восстановить дамп в `tg` схему.
+5. Проверить количество строк и ключевые таблицы.
+6. Убедиться, что TG runtime артефакты (session/config/prompts) сохранены.
 
-Миграции:
-- таблица embeddings на `vector(768)` задаётся в `kb_ring/db/migrations/004_e5_embeddings_768.sql`.
-  - В текущем виде миграция пересоздаёт `tac.embeddings` (если нужно без потерь данных, миграцию надо адаптировать).
+Рекомендуемый инструмент:
+- `ops/step1_nil/restore_tg_dump_to_kb_ring.sh`
 
-Индексы pgvector:
-- создаётся `ivfflat` индекс под cosine ops; для качества/скорости на больших объёмах потребуется тюнинг (lists/probes) и `ANALYZE`.
+## 6. Подготовка subpath
+
+### 6.1 TG (`/tg`)
+
+- Базовый подход: FastAPI `root_path=/tg` + корректировка ссылок/статики.
+- На первом этапе допускается минимальный патч “как проще”, если UI стабилен.
+
+Инструмент:
+- `ops/step1_nil/patch_tg_subpath.sh`
+
+### 6.2 transcription (`/transcription`)
+
+- Допускаются правки `index.html`.
+- Все фронтовые API вызовы должны работать через `/transcription/...`.
+
+Инструмент:
+- `ops/step1_nil/patch_transcription_subpath.sh`
+
+## 7. OCR политика шага 1
+
+- Primary: `OCR.space`.
+- Fallback: `tesseract`.
+- Модель очереди: последовательная отправка OCR задач.
+- Минимальный форматный набор:
+  - `pdf` (включая сканы)
+  - `jpg/png`
+  - `docx`
+  - `txt/md/html`
+
+## 8. Проверка сервиса до решения о деплое
+
+### 8.1 Технический smoke
+
+1. Health:
+- API жив
+- worker жив
+- postgres жив
+
+2. Auth:
+- JWT cookie принимается всеми нужными сервисами.
+
+3. Ingest:
+- transcription публикует markdown в KB-RING.
+- TG данные доступны после restore.
+
+4. Index:
+- создаются chunks/embeddings.
+
+5. Search/RAG:
+- `search` возвращает результаты
+- `rag-tech` возвращает citations
+
+6. OCR:
+- на тестовом наборе форматов text extraction проходит
+
+### 8.2 Нагрузочная sanity-проверка
+
+- проверить, что при индексации лимиты worker/api удерживают нагрузку в согласованных пределах.
+- проверить, что latency API не деградирует до нерабочего уровня.
+
+## 9. Мониторинг (zabbix-like)
+
+Минимум контролируемых сигналов:
+- host CPU/RAM/Disk
+- DB connection pressure
+- API latency/error
+- worker queue depth/error
+- TG/transcription service status
+- OCR error rate / timeout rate
+
+Если полноценный Zabbix сервер недоступен, допускается временный аналог с сопоставимым покрытием метрик.
+
+## 10. Откат и безопасность
+
+- Перед изменениями хранить backup конфигов/дампов.
+- Секреты не выводить в логи и не коммитить.
+- При деградации:
+  - вернуть прошлую конфигурацию прокси;
+  - остановить новые сервисы;
+  - восстановить прежний рабочий маршрут.
+
+## 11. Финальный отчёт перед деплоем
+
+Перед запросом на деплой фиксируется отчёт:
+1. Список выполненных проверок.
+2. Что прошло и что не прошло.
+3. Остаточные риски.
+4. Готовность к запуску на Ниле.
+
+Этот отчёт является обязательным входом для решения “деплоить / не деплоить”.
