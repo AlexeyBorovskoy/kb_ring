@@ -27,6 +27,15 @@
 - `check_server_access.sh`
 - Проверка SSH-доступа и ключевых путей/сервисов на целевых серверах.
 
+- `preflight_nil_deploy_start.sh`
+- Расширенный preflight именно перед стартом деплоя на Ниле: SSH/sudo/systemd/пути/Caddy/disk + отчет в `ops/step1_nil/reports/`.
+
+- `prepare_nil_deploy_start.sh`
+- Подготовка старта деплоя по правилам обслуживания Нила: backup конфигов, подготовка каталогов, запись в `logbook.md`.
+
+- `DEPLOY_START_NIL.md`
+- Краткий runbook запуска preflight + prepare и критерии готовности к старту деплоя.
+
 - `prepare_nil_layout.sh`
 - Создание базовой структуры каталогов на Ниле.
 
@@ -61,7 +70,27 @@ bash ops/step1_nil/check_server_access.sh
 - доступ к TG серверу подтверждён;
 - ключевые пути читаются.
 
-### Шаг B. Подготовить layout на Ниле
+### Шаг B. Preflight перед стартом деплоя
+
+```bash
+NIL_SSH=vps-ripas-229 bash ops/step1_nil/preflight_nil_deploy_start.sh
+```
+
+Ожидаемый результат:
+- создан отчет `ops/step1_nil/reports/preflight_<ts>.md`;
+- в отчете нет статусов `FAIL`.
+
+### Шаг C. Подготовка старта деплоя (backup + logbook)
+
+```bash
+NIL_SSH=vps-ripas-229 bash ops/step1_nil/prepare_nil_deploy_start.sh
+```
+
+Ожидаемый результат:
+- создан backup в `/opt/backups/kb_ring_deploy_start_<ts>`;
+- добавлена запись в `/opt/server-docs/logbook.md`.
+
+### Шаг D. Подготовить layout на Ниле
 
 ```bash
 NIL_SSH=vps-ripas-229 bash ops/step1_nil/prepare_nil_layout.sh
@@ -70,7 +99,7 @@ NIL_SSH=vps-ripas-229 bash ops/step1_nil/prepare_nil_layout.sh
 Ожидаемый результат:
 - существуют `/opt/kb-ring` и `/opt/tg_digest_system`.
 
-### Шаг C. Применить subpath патчи
+### Шаг E. Применить subpath патчи
 
 TG:
 ```bash
@@ -85,7 +114,7 @@ TRANSCRIPTION_DIR=/opt/transcription bash ops/step1_nil/patch_transcription_subp
 Ожидаемый результат:
 - фронт и API пути корректно работают под `/tg` и `/transcription`.
 
-### Шаг D. Восстановить TG дамп в `kb_ring`
+### Шаг F. Восстановить TG дамп в `kb_ring`
 
 ```bash
 DUMP=/path/to/tg_digest.dump \
@@ -128,4 +157,3 @@ bash ops/step1_nil/restore_tg_dump_to_kb_ring.sh
 - `docs/PLAN_SYSTEM.md`
 - `docs/PLAN_STEP1_NIL_SERVER.md`
 - `docs/DEPLOY_RU.md`
-
