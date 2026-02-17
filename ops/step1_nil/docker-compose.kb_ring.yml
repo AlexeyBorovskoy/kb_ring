@@ -32,7 +32,7 @@ services:
       AUTH_COOKIE_SECURE: "1"
       # CPU-only stack
       EMBEDDINGS_ENABLED: "1"
-      EMBEDDINGS_MODEL: sentence-transformers/multilingual-e5-base
+      EMBEDDINGS_MODEL: intfloat/multilingual-e5-base
       EMBEDDINGS_DIMS: "768"
       RERANK_ENABLED: "1"
       RERANK_MODEL: BAAI/bge-reranker-base
@@ -61,7 +61,7 @@ services:
       DATABASE_URL: postgresql://kb_ring:${KB_POSTGRES_PASSWORD:-kb_ring_local_change_me}@kb_postgres:5432/kb_ring
       # CPU-only stack
       EMBEDDINGS_ENABLED: "1"
-      EMBEDDINGS_MODEL: sentence-transformers/multilingual-e5-base
+      EMBEDDINGS_MODEL: intfloat/multilingual-e5-base
       EMBEDDINGS_DIMS: "768"
       EMBEDDINGS_BATCH_SIZE: "16"
     command: ["python", "-m", "kb_ring.worker_main"]
@@ -71,4 +71,3 @@ services:
 volumes:
   kb_postgres_data:
     name: kb_postgres_data
-

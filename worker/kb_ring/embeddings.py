@@ -16,7 +16,7 @@ def _env_int(name: str, default: str) -> int:
 
 
 EMBEDDINGS_ENABLED = _env_bool("EMBEDDINGS_ENABLED", "1")
-EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "sentence-transformers/multilingual-e5-base")
+EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "intfloat/multilingual-e5-base")
 EMBEDDINGS_DIMS = _env_int("EMBEDDINGS_DIMS", "768")
 EMBEDDINGS_BATCH_SIZE = _env_int("EMBEDDINGS_BATCH_SIZE", "32")
 

@@ -24,7 +24,7 @@ OPENAI_EMBED_MODEL = env("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 # Если зависимости не установлены (sentence-transformers/torch), сервис продолжит работать в режиме FTS-only.
 EMBEDDINGS_ENABLED = env("EMBEDDINGS_ENABLED", "1").lower() in ("1", "true", "yes")
 # E5 требует разные префиксы для query/passage. См. embeddings.py.
-EMBEDDINGS_MODEL = env("EMBEDDINGS_MODEL", "sentence-transformers/multilingual-e5-base")
+EMBEDDINGS_MODEL = env("EMBEDDINGS_MODEL", "intfloat/multilingual-e5-base")
 EMBEDDINGS_DIMS = int(env("EMBEDDINGS_DIMS", "768") or "768")
 EMBEDDINGS_BATCH_SIZE = int(env("EMBEDDINGS_BATCH_SIZE", "32") or "32")
 

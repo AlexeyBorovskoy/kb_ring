@@ -15,7 +15,7 @@ set -euo pipefail
 #   RUN_MODEL_TESTS=1 bash scripts/ai_worker_preflight.sh
 #
 # Optional settings:
-#   EMBED_MODEL=sentence-transformers/multilingual-e5-base
+#   EMBED_MODEL=intfloat/multilingual-e5-base
 #   RERANK_MODEL=BAAI/bge-reranker-base
 #   HF_HOME=$HOME/.cache/huggingface
 #   NIL_BASE_URL=https://kb.<ip>.nip.io   # optional connectivity check
@@ -23,7 +23,7 @@ set -euo pipefail
 TS="$(date +%Y%m%d_%H%M%S)"
 REPORT="/tmp/kb_ring_ai_worker_preflight_${TS}.txt"
 
-EMBED_MODEL="${EMBED_MODEL:-sentence-transformers/multilingual-e5-base}"
+EMBED_MODEL="${EMBED_MODEL:-intfloat/multilingual-e5-base}"
 RERANK_MODEL="${RERANK_MODEL:-BAAI/bge-reranker-base}"
 RUN_MODEL_TESTS="${RUN_MODEL_TESTS:-0}"
 NIL_BASE_URL="${NIL_BASE_URL:-}"

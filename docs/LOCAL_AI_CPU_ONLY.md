@@ -4,7 +4,7 @@
 
 ## Выбранный стек
 
-- Embeddings: `sentence-transformers/multilingual-e5-base` (768 dims) в `tac.embeddings.embedding vector(768)`.
+- Embeddings: `intfloat/multilingual-e5-base` (768 dims) в `tac.embeddings.embedding vector(768)`.
 - Reranker: `BAAI/bge-reranker-base` (cross-encoder), применяется в runtime (не в индексации).
 - NER: regex (обязательный слой) + (опц.) модель ruBERT NER.
 - Local LLM (опц.): Ollama 7B Q4, используется только как fallback для черновиков.
@@ -26,7 +26,7 @@
 ## Переменные окружения
 
 - `EMBEDDINGS_ENABLED=1`
-- `EMBEDDINGS_MODEL=sentence-transformers/multilingual-e5-base`
+- `EMBEDDINGS_MODEL=intfloat/multilingual-e5-base`
 - `EMBEDDINGS_DIMS=768`
 - `RERANK_ENABLED=1`
 - `RERANK_MODEL=BAAI/bge-reranker-base`
@@ -46,4 +46,3 @@ curl -s -X POST 'http://127.0.0.1:8099/api/v1/dev/login' -d 'user_id=1' -c /tmp/
 curl -s -X POST 'http://127.0.0.1:8099/api/v1/chat/sessions' -d 'title=ui' -b /tmp/kb.cookie
 curl -s -X POST 'http://127.0.0.1:8099/api/v1/chat/sessions/1/message' -d 'text=Дай описание и примеры интерфейсов АСУДД' -d 'mode=rag-tech' -b /tmp/kb.cookie
 ```
-
