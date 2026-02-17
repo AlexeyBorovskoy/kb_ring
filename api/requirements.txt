@@ -5,5 +5,5 @@ psycopg[binary]==3.2.4
 PyJWT==2.9.0
 httpx==0.27.2
 python-multipart==0.0.9
-sentence-transformers==3.0.1
-numpy==1.26.4
+# NOTE: heavy AI deps (torch/sentence-transformers/transformers) must NOT be installed on Nil.
+# They are intended to run on a remote laptop/VM worker. The API degrades to FTS-only if missing.
